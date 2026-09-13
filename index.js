@@ -42,7 +42,7 @@
     const EXTENSION_SETTINGS_KEY = 'silly-game';
     const DEFAULT_EXTENSION_FOLDER = 'st-game-center';
     const LOADED_SCRIPT_URL = document.currentScript?.src || '';
-    const CURRENT_VERSION = '2.1.7';
+    const CURRENT_VERSION = '2.1.9';
     const DEFAULT_EXTENSION_SETTINGS = Object.freeze({
         launcherEnabled: true,
         checkOnStartup: true,
@@ -1208,16 +1208,6 @@
         }
     }
 
-    function buildCharacterCompanionCardInfo() {
-        const companions = resolveCharacterCompanions();
-        return {
-            name: companions.length ? companions.map(c => c.name).join('、') : '角色陪玩',
-            description: companions.length
-                ? `已选择 ${companions.length} 个角色席位。普通角色只读取角色简介；世界书角色只读取指定条目。`
-                : '先选择角色卡，或从角色卡的世界书中选择条目作为独立角色。',
-        };
-    }
-
     async function renderCharacterCompanion(body) {
         const ctx = getCharacterCompanionContext();
         const settings = getCharacterCompanionSettings();
@@ -1304,8 +1294,19 @@
                     && (slot.source !== 'worldbook' || (item.entryIndex === slot.entryIndex && item.entryId === slot.entryId))));
             }
         }
-        function slotLabel(slot) {
-            return slot.source === 'worldbook' ? `wb:${slot.characterIndex}:${slot.entryIndex}:${slot.entryId}` : `char:${slot.characterIndex}`;
+
+        // 角色勾选即时写入全局陪玩设置；“保存陪玩设置”仍保留作显式确认。
+        // 这样即使用户直接从首页进入 UNO / 斗地主，也不会丢掉刚刚选择的角色。
+        function persistPickedCompanionSlots() {
+            const saved = saveCharacterCompanionSettings({ companionSlots: normalizeCompanionSlots(pickedSlots) });
+            state.characterCompanion = saved;
+            if (state.uno?.companion?.enabled) state.uno.companion.settings = { ...saved };
+            if (state.doudizhu?.companion?.enabled) state.doudizhu.companion.settings = { ...saved };
+            if (state.gomoku?.companion?.enabled) state.gomoku.companion.settings = { ...saved };
+            if (state.chess?.companion?.enabled) state.chess.companion.settings = { ...saved };
+            if (state.xiangqi?.companion?.enabled) state.xiangqi.companion.settings = { ...saved };
+            if (state.go?.companion?.enabled) state.go.companion.settings = { ...saved };
+            return saved;
         }
 
         chars.forEach(({ c, index }) => {
@@ -1351,6 +1352,7 @@
                     return;
                 }
                 toggleSlot(mainSlot, checkbox.checked);
+                persistPickedCompanionSlots();
                 updateCharacterPicker();
             });
 
@@ -1402,20 +1404,15 @@
                     entryAvatarInput.addEventListener('change', async () => { const file = entryAvatarInput.files?.[0]; entryAvatarInput.value = ''; if (!file) return; try { const dataUrl = await fileToCompressedDataUrl(file); const currentSettings = getCharacterCompanionSettings(); currentSettings.avatarOverrides = { ...(currentSettings.avatarOverrides || {}), [entrySlotKey]: dataUrl }; saveCharacterCompanionSettings({ avatarOverrides: currentSettings.avatarOverrides }); syncEntryAvatar(); } catch (error) { notify(error?.message || '头像设置失败', 'Silly Game'); } });
                     row.append(cb, entryAvatarButton, entryAvatarInput, el('span', { class: 'stgc-companion-worldbook-entry-name', text: entry.title }), el('small', { text: '1条目=1角色' }));
                     entryBox.append(row);
-                    const matchesQuery = () => {
-                        const query = charSearch.value.trim().toLocaleLowerCase();
-                        return !query || name.toLocaleLowerCase().includes(query) || entry.title.toLocaleLowerCase().includes(query) || entry.content.toLocaleLowerCase().includes(query);
-                    };
                     cb.addEventListener('change', () => {
                         if (cb.checked && pickedSlots.length >= 3 && !hasSlot(slot)) {
                             cb.checked = false;
                             return;
                         }
                         toggleSlot(slot, cb.checked);
+                        persistPickedCompanionSlots();
                         updateCharacterPicker();
                     });
-                    row.dataset.slot = slotLabel(slot);
-                    row.dataset.matches = matchesQuery() ? '1' : '0';
                 });
             });
         });
@@ -2334,10 +2331,18 @@
     async function ddzBidCompanion(g,onUpdate){const token=state.doudizhuSession;if(!ddzSessionActive(g,token))return;const p=g.current,companion=resolveCharacterCompanionForPlayer(g,p);if(!companion){ddzBidLocal(g,p);ddzAdvanceBid(g,onUpdate);return;}g.companionThinking=true;g.message=`${companion.name} 正在叫地主 · ${companionRateText('API')}`;onUpdate();try{const snap={game:'斗地主',phase:'bid',playerIndex:p,playerName:ddzPlayerName(g,p),hand:g.hands[p],currentPlayer:g.current,highestBid:g.highestBid,legalBids:[0,1,2,3].filter(v=>v===0||v>g.highestBid)};const loaded=await ensureCharacterData(companion.characterIndex);if(!ddzSessionActive(g,token))return;if(loaded)companion.character=loaded;if(companion.source==='character')companion.promptText=characterCompanionText(companion.character);const prompt=['【Silly Game 角色陪玩协议】','你正在参加斗地主叫地主阶段。只参考角色简介；若为世界书条目角色，只参考该条目。','选择一个合法叫分 0/1/2/3。不能修改手牌或规则。只输出 JSON。', '{"bid":0,"speech":"一句很短的台词"}', `【角色】\n${companion.promptText||companion.name}`,`【局面】\n${JSON.stringify(snap)}`].join('\n');const res=await generateCharacterCompanionWithSelectedProfile(getLiveCompanionSettings(g),prompt,140);if(!ddzSessionActive(g,token))return;const o=parseStructuredResult(res);let bid=Math.max(0,Math.min(3,Number(o?.bid)||0));if(bid!==0&&bid<=g.highestBid)bid=0;g.bids[p]=bid;g.highestBid=Math.max(g.highestBid,bid);g.message=`${companion.name} 叫 ${bid} 分`;if(getLiveCompanionSettings(g).speak!==false&&typeof o?.speech==='string'&&o.speech.trim())g.message+=` · “${o.speech.trim().slice(0,120)}”`;g.companionThinking=false;ddzAdvanceBid(g,onUpdate);}catch(e){if(!ddzSessionActive(g,token))return;console.warn('[Silly Game] Doudizhu bidding failed',e);g.companionThinking=false;g.bids[p]=ddzBidLocal(g,p);g.highestBid=Math.max(g.highestBid,g.bids[p]);g.message=`${companion.name} 暂时没叫好，使用本地策略`;ddzAdvanceBid(g,onUpdate);}}
     function ddzAdvanceBid(g,onUpdate){if(!ddzSessionActive(g,state.doudizhuSession))return;const bid=g.bids[g.current];if(g.bids.every(v=>v!==null)){let landlord=g.bids.indexOf(Math.max(...g.bids)); if(Math.max(...g.bids)===0) landlord=Math.floor(Math.random()*3);g.landlord=landlord;g.hands[landlord]=ddzSortCards([...g.hands[landlord],...g.bottom]);g.bottom=[];g.phase='play';g.current=landlord;g.lastMove=null;g.passes=0;g.message=`${ddzPlayerName(g,landlord)} 成为地主`;ddzSave(g);onUpdate();if(g.current!==0){ddzSchedule(g,onUpdate,800,()=>{const c=g.companion.enabled?resolveCharacterCompanionForPlayer(g,g.current):null;if(c)ddzCompanionTurn(g,onUpdate);else ddzLocalTurn(g,onUpdate);});}return;}g.current=(g.current+1)%3;ddzSave(g);onUpdate();if(g.current!==0){ddzSchedule(g,onUpdate,700,()=>{const c=g.companion.enabled?resolveCharacterCompanionForPlayer(g,g.current):null;if(c)ddzBidCompanion(g,onUpdate);else {g.bids[g.current]=ddzBidLocal(g,g.current);g.highestBid=Math.max(g.highestBid,g.bids[g.current]);g.message=`${ddzPlayerName(g,g.current)} 叫 ${g.bids[g.current]} 分`;ddzAdvanceBid(g,onUpdate);}});}}
     function renderDoudizhu(body){
-        cleanupGame(); state.doudizhu=ddzLoad()||ddzDeal();
-        const cs=getCharacterCompanionSettings();
-        if(state.characterCompanion) state.doudizhu.companion={enabled:resolveCharacterCompanions(state.characterCompanion,3).length>0,settings:{...cs,...state.characterCompanion}};
-        if(state.doudizhu.companion?.enabled&&!resolveCharacterCompanions(getLiveCompanionSettings(state.doudizhu),3).length)state.doudizhu.companion.enabled=false;
+        cleanupGame();
+        const loadedDdz = ddzLoad();
+        state.doudizhu = loadedDdz || ddzDeal();
+        const cs = getCharacterCompanionSettings();
+        const savedCompanions = resolveCharacterCompanions(cs, 3);
+        if (state.characterCompanion) {
+            state.doudizhu.companion = { enabled: resolveCharacterCompanions(state.characterCompanion, 3).length > 0, settings: { ...cs, ...state.characterCompanion } };
+        } else if (!loadedDdz && savedCompanions.length) {
+            state.doudizhu.companion = { enabled: true, settings: cs };
+        }
+        if (state.doudizhu.companion?.enabled && !resolveCharacterCompanions(getLiveCompanionSettings(state.doudizhu), 3).length) state.doudizhu.companion.enabled = false;
+        if (state.doudizhu.companion) state.doudizhu.companion.settings = { ...getCharacterCompanionSettings(), ...(state.doudizhu.companion.settings || {}) };
         ddzSave();
 
         const bar=el('div',{class:'stgc-status-row ddz-topbar'}),
@@ -3167,10 +3172,22 @@
         if(!g.over&&g.current!==0){state.unoTimer=setTimeout(()=>{if(state.uno!==g||state.currentGame!=='uno')return;const nextCompanion=g.companion?.enabled?resolveCharacterCompanionForPlayer(g,g.current):null;if(nextCompanion)unoCompanionTurn(state.uno,onUpdate);else unoAiTurn(state.uno,onUpdate);},1300);}
     }
     function renderUno(body){
-        cleanupGame();state.uno=unoLoad()||unoNew();
-        const companionSettings=getCharacterCompanionSettings();
-        if (state.characterCompanion) { const companionSettingsForUno={...companionSettings,...state.characterCompanion}; state.uno.companion={enabled:resolveCharacterCompanions(companionSettingsForUno,3).length>0,settings:companionSettingsForUno}; }
-        if (state.uno.companion?.enabled && !resolveCharacterCompanions(state.uno.companion.settings).length) { state.uno.companion.enabled=false; }
+        cleanupGame();
+        const loadedUno = unoLoad();
+        state.uno = loadedUno || unoNew();
+        const companionSettings = getCharacterCompanionSettings();
+        const savedCompanions = resolveCharacterCompanions(companionSettings, 3);
+        if (state.characterCompanion) {
+            const latest = { ...companionSettings, ...state.characterCompanion };
+            state.uno.companion = { enabled: resolveCharacterCompanions(latest, 3).length > 0, settings: latest };
+        } else if (!loadedUno && savedCompanions.length) {
+            // 新开 UNO 时，直接采用已经保存的陪玩配置；已有存档则尊重原来的模式。
+            state.uno.companion = { enabled: true, settings: companionSettings };
+        }
+        if (state.uno.companion?.enabled && !resolveCharacterCompanions(getLiveCompanionSettings(state.uno), 3).length) {
+            state.uno.companion.enabled = false;
+        }
+        if (state.uno.companion) state.uno.companion.settings = { ...getCharacterCompanionSettings(), ...(state.uno.companion.settings || {}) };
         unoSave();
         const bar=el('div',{class:'stgc-status-row'}),status=el('div',{class:'stgc-status-text'}),rateInfo=el('div',{class:'stgc-companion-rate-game',text:companionRateText('AI 请求')}),modeBtn=el('button',{class:'stgc-btn',type:'button'}),drawBtn=el('button',{class:'stgc-btn',type:'button',text:'摸牌'}),passBtn=el('button',{class:'stgc-btn',type:'button',text:'过牌'}),unoBtn=el('button',{class:'stgc-btn',type:'button',text:'喊 UNO'}),reset=el('button',{class:'stgc-btn',type:'button',text:'重新开始'});
         bar.append(status,rateInfo,modeBtn,drawBtn,passBtn,unoBtn,reset);
@@ -5435,13 +5452,6 @@
             : 0;
         const companion = companions[slotIndex] || null;
         return { settings, companion, companions, slotIndex };
-    }
-
-    function companionIdentity(companion) {
-        if (!companion) return '';
-        return companion.source === 'worldbook'
-            ? `worldbook:${companion.characterIndex}:${companion.entryIndex}:${companion.entryId}`
-            : `character:${companion.characterIndex}`;
     }
 
     function boardCompanionModeLabel(game, fallback = '角色陪玩') {
